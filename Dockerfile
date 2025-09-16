@@ -15,5 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 COPY main.py .
 
-# Executa como Web Service (porta $PORT) — 1 worker para não duplicar a thread
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:${PORT}", "main:app"]
+# 🔑 Expõe a porta que o Render precisa detectar
+EXPOSE 10000
+
+# 🔑 Usa $PORT (variável que o Render define automaticamente)
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:10000", "main:app"]
