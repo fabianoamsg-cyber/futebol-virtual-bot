@@ -10,8 +10,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
+    pip install gunicorn && \
     python -m playwright install chromium
 
 COPY main.py .
 
-CMD ["python", "main.py"]
+# Executa como Web Service (porta $PORT) — 1 worker para não duplicar a thread
+CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:${PORT}", "main:app"]
