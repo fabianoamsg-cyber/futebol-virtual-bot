@@ -10,13 +10,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt && \
-    pip install gunicorn && \
+    pip install --no-cache-dir gunicorn && \
     python -m playwright install chromium
 
 COPY main.py .
 
-# 🔑 Expõe a porta que o Render precisa detectar
-EXPOSE 10000
-
-# 🔑 Usa $PORT (variável que o Render define automaticamente)
-CMD ["gunicorn", "-w", "1", "-b", "0.0.0.0:10000", "main:app"]
+# Render detecta a porta pelo bind do Gunicorn (não precisa EXPOSE fixo)
+# Use shell form para expandir $PORT corretamente
+CMD ["sh", "-c", "gunicorn -w 1 -b 0.0.0.0:${PORT} main:app"]
