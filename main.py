@@ -1,5 +1,7 @@
 # main.py — Futebol Virtual -> Sinais no Telegram (Web Service + Playwright leve)
-# Observação: Virtuais são RNG; este bot só filtra "value". Use gestão e 1 gale.
+# Notas:
+# - Virtuais são RNG. O bot só filtra "value". Use gestão de banca e apenas 1 gale.
+# - Este arquivo inclui: /health, /scan (diagnóstico), giro de ligas e horários.
 
 import os, math, re, time, threading
 from datetime import datetime
@@ -20,13 +22,12 @@ INTERVAL_MIN= int(os.getenv("INTERVAL_MIN")  or "3")
 BET365_URL  = os.getenv("BET365_URL") or "https://www.bet365.bet.br/#/AVR/B146/R^1/"
 COOKIES_JSON= os.getenv("COOKIES_JSON") or ""
 
-# Bot só é criado se houver token (evita crash no import)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 last_signal = {"text": None}
 bankroll_state = {"bankroll": BANKROLL}
 
 # ------------------ FLASK ------------------
-app = Flask(__name__)  # <— PRECISA existir para o gunicorn: main:app
+app = Flask(__name__)  # <- o gunicorn usa main:app
 
 @app.get("/")
 def root():
@@ -47,8 +48,11 @@ def p_btts(l):
 def odd(p): return float('inf') if p<=0 else 1.0/max(min(p, 0.999999), 1e-9)
 
 LAMBDA_TABLE = [
-    (1.70,1.78,3.0,1.73),(1.79,1.92,2.8,1.88),
-    (1.93,2.10,2.6,2.07),(2.11,2.35,2.4,2.33),(2.36,2.70,2.2,2.65)
+    (1.70,1.78,3.0,1.73),
+    (1.79,1.92,2.8,1.88),
+    (1.93,2.10,2.6,2.07),
+    (2.11,2.35,2.4,2.33),
+    (2.36,2.70,2.2,2.65)
 ]
 def lam_from_o25(o25):
     best=(None,999)
@@ -59,68 +63,115 @@ def lam_from_o25(o25):
 
 def fmt_money(x): return f"R${x:,.2f}".replace(",", "X").replace(".", ",").replace("X",".")
 
-# ------------------ EXTRAÇÃO DE ODDS ------------------
+# ------------------ PARSERS ------------------
+ODD_PAT = r"([1-9]\d*(?:[.,]\d{1,2})?)"
+
 def parse_float(txt):
     try: return float(txt.replace(",", "."))
     except: return None
 
-def extract_by_regex(html):
+def extract_from_html(html: str):
+    """Regex no HTML (main frame)."""
     o15=o25=btts=None
-    num=r"([1-9]\d*(?:[.,]\d{1,2})?)"
-    m15=re.search(r"[\s>](?:1[.,]5)[\s\S]{0,120}?"+num, html)
-    if m15: o15=parse_float(m15.group(1))
-    m25=re.search(r"[\s>](?:2[.,]5)[\s\S]{0,120}?"+num, html)
+    m25=re.search(r"(?:Mais\s+de\s*)?2[.,]5[\s\S]{0,120}?"+ODD_PAT, html, re.I)
     if m25: o25=parse_float(m25.group(1))
-    mb=re.search(r"Ambos\s+os\s+Times[\s\S]{0,200}?Sim[\s\S]{0,20}?"+num, html)
-    if mb: btts=parse_float(mb.group(1))
+    m15=re.search(r"(?:Mais\s+de\s*)?1[.,]5[\s\S]{0,120}?"+ODD_PAT, html, re.I)
+    if m15: o15=parse_float(m15.group(1))
+    mb =re.search(r"(Ambos\s+os\s+Times|Ambas\s+as\s+Equipes|Ambos\s+Marcam)[\s\S]{0,160}?(?:Sim)[\s\S]{0,32}?"+ODD_PAT, html, re.I)
+    if mb:  btts=parse_float(mb.group(1))
+    return {"O15":o15,"O25":o25,"BTTS":btts}
+
+def extract_from_text(text: str):
+    """Regex no texto bruto renderizado (innerText)."""
+    o15=o25=btts=None
+    m25=re.search(r"Mais\s*de\s*2[.,]5[\s\n\r]{0,10}"+ODD_PAT, text, re.I)
+    if m25: o25=parse_float(m25.group(1))
+    m15=re.search(r"Mais\s*de\s*1[.,]5[\s\n\r]{0,10}"+ODD_PAT, text, re.I)
+    if m15: o15=parse_float(m15.group(1))
+    mb =re.search(r"(Ambos\s+os\s+Times|Ambas\s+as\s+Equipes|Ambos\s+Marcam)[\s\S]{0,160}?(?:Sim)[\s\S]{0,32}?"+ODD_PAT, text, re.I)
+    if mb:  btts=parse_float(mb.group(1))
+    # Fallback sem “Mais de”: 2.5 em linha com odd ao lado
+    if not o25:
+        m=re.search(r"\b2[.,]5\b[\s\n\r]{0,20}"+ODD_PAT, text)
+        if m: o25=parse_float(m.group(1))
+    if not o15:
+        m=re.search(r"\b1[.,]5\b[\s\n\r]{0,20}"+ODD_PAT, text)
+        if m: o15=parse_float(m.group(1))
     return {"O15":o15,"O25":o25,"BTTS":btts}
 
 def extract_by_locators(page):
+    """Vasculha o DOM por vizinhança de '1.5'/'2.5' e por 'Ambos os Times'."""
     o15=o25=btts=None
     try:
-        html = page.content()
-        for needle,key in [("1.5","O15"),("2.5","O25")]:
-            m = re.search(needle+r"[\s\S]{0,150}?([1-9]\d*(?:[.,]\d{1,2})?)", html)
-            if m:
-                val=parse_float(m.group(1))
-                if key=="O15": o15=val
-                else: o25=val
-        node = page.locator("text=Ambos os Times").first
+        # odds próximas de “2.5” e “1.5”
+        for needle,key in [("2.5","O25"),("1.5","O15")]:
+            node = page.locator(f"text=/\\b{needle}\\b/").first
+            if node:
+                # pega HTML do contêiner mais próximo
+                html = node.locator("xpath=ancestor-or-self::*[1]").inner_html()
+                m = re.search(ODD_PAT, html)
+                if m:
+                    val = parse_float(m.group(1))
+                    if key=="O25": o25=val
+                    else: o15=val
+        # BTTS
+        node = page.locator("text=/Amb(os|as).*(Times|Equipes)|Ambos\\s+Marcam/i").first
         if node:
-            parent = node.locator("xpath=..")
-            inner = parent.inner_html()
-            m = re.search(r"Sim[\s\S]{0,40}?([1-9]\d*(?:[.,]\d{1,2})?)", inner)
+            inner = node.locator("xpath=..").inner_html()
+            m = re.search(r"Sim[\s\\S]{0,40}?"+ODD_PAT, inner, re.I)
             if m: btts=parse_float(m.group(1))
-    except: pass
+    except:
+        pass
     return {"O15":o15,"O25":o25,"BTTS":btts}
 
-def merge_odds(a,b):
+def merge_odds(a,b,c):
     out={}
     for k in ["O15","O25","BTTS"]:
-        out[k]=a.get(k) or b.get(k)
+        out[k]=a.get(k) or b.get(k) or c.get(k)
     return out
 
-# ------------------ NAVEGAÇÃO ENTRE LIGAS ------------------
+# ------------------ NAVEGAÇÃO ------------------
 LEAGUES_PT = ["Express Cup", "Copa do Mundo", "Euro Cup", "Super Liga Sul-Americana", "Premier League"]
 
 def goto_league(page, name):
     try:
         tab = page.locator(f"text={name}").first
         if tab:
-            tab.click(timeout=3000)
-            page.wait_for_timeout(2500)
+            tab.click(timeout=2500)
+            page.wait_for_timeout(2000)
             # tenta expandir Gols Mais/Menos
             try:
-                page.locator("text=Gols Mais/Menos").first.click(timeout=800)
-                page.wait_for_timeout(600)
+                page.locator("text=/Gols\\s+Mais\\/Menos|Total\\s+de\\s+Gols/i").first.click(timeout=800)
+                page.wait_for_timeout(400)
             except: pass
             return True
     except: pass
     return False
 
+def click_time_slot(page):
+    """Clica no primeiro horário visível (ex.: 21:52) para sair de 'Evento iniciado'."""
+    try:
+        slots = page.locator("text=/^\\d{2}:\\d{2}$/")
+        n = slots.count()
+        for i in range(min(n,5)):
+            try:
+                slots.nth(i).click(timeout=800)
+                page.wait_for_timeout(1200)
+                return True
+            except:
+                continue
+    except:
+        pass
+    return False
+
 def grab_odds_now(page):
+    """Combina 3 estratégias: HTML, innerText e locators."""
     html = page.content()
-    return merge_odds(extract_by_regex(html), extract_by_locators(page))
+    text = page.evaluate("document.body.innerText")  # captura texto renderizado
+    a = extract_from_html(html)
+    b = extract_from_text(text)
+    c = extract_by_locators(page)
+    return merge_odds(a,b,c)
 
 # ------------------ PLAYWRIGHT (modo leve) ------------------
 def with_browser(fn):
@@ -158,16 +209,17 @@ def with_browser(fn):
             page.goto(BET365_URL, timeout=60000, wait_until="domcontentloaded")
             try: page.wait_for_load_state("networkidle", timeout=15000)
             except: pass
-            page.wait_for_timeout(6000)  # tempo pro grid aparecer
+            page.wait_for_timeout(5000)
             res = fn(page)
             context.close(); browser.close()
             return res
     return _wrap
 
-# ------------------ DECISÃO E MENSAGEM ------------------
+# ------------------ DECISÃO ------------------
 def decide_and_text(odds):
     o25=odds.get("O25"); o15=odds.get("O15"); b=odds.get("BTTS")
     if not o25: return None, "Sem O2.5 na tela — pulando."
+    # λ estimado pela faixa de O2.5
     lam=lam_from_o25(o25)
     p15=p_over15(lam); fair15=odd(p15)
     p25=p_over25(lam); fair25=odd(p25)
@@ -201,21 +253,29 @@ def decide_and_text(odds):
         body += [f"⚠️ Sem value claro (diferença ~ {dv*100:.1f}%). Pular."]
     return (True, header+"\n"+"\n".join(body)), None
 
-# ------------------ SCAN: gira ligas até achar odds ------------------
+# ------------------ SCAN ------------------
 @with_browser
 def scan_once(page):
     odds = {"O15": None, "O25": None, "BTTS": None}
     league_used = None
 
-    # tenta na liga atual
+    # 1) tenta liga atual
     try:
         odds = grab_odds_now(page)
-    except: pass
+    except:
+        pass
 
-    # se não achou O2.5, gira pelas ligas
+    # 2) se ainda sem O2.5, clica em horários (foge do 'Evento iniciado')
+    if not odds.get("O25"):
+        if click_time_slot(page):
+            odds = grab_odds_now(page)
+
+    # 3) se ainda não achou, gira ligas
     if not odds.get("O25"):
         for lg in LEAGUES_PT:
             if goto_league(page, lg):
+                # após trocar de liga, também tenta clicar num horário
+                click_time_slot(page)
                 tmp = grab_odds_now(page)
                 if tmp.get("O25"):
                     odds = tmp
@@ -236,20 +296,20 @@ def scan_once(page):
 
     return {"odds": odds, "sent": False, "reason": "duplicated or no bot", "league": league_used}
 
-# ------------------ SCHEDULER ------------------
+# ------------------ AGENDADOR ------------------
 def scheduler_loop():
     schedule.every(INTERVAL_MIN).minutes.do(scan_once)
-    time.sleep(40)  # atraso para não pesar no boot
+    time.sleep(40)  # atraso no boot p/ não sobrecarregar
     scan_once()
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# inicia a thread assim que o módulo é importado
+# inicializa thread do agendador ao importar
 t = threading.Thread(target=scheduler_loop, daemon=True)
 t.start()
 
-# endpoint de diagnóstico
+# diagnóstico manual
 @app.get("/scan")
 def scan_endpoint():
     try:
