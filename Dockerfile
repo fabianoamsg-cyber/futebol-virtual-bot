@@ -15,6 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 COPY main.py .
 
-# Render detecta a porta pelo bind do Gunicorn (não precisa EXPOSE fixo)
-# Use shell form para expandir $PORT corretamente
-CMD ["sh", "-c", "gunicorn -w 1 -b 0.0.0.0:${PORT} main:app"]
+# Tempo maior pro worker inicializar com folga
+CMD ["sh", "-c", "gunicorn -w 1 -t 180 -b 0.0.0.0:${PORT} main:app"]
