@@ -1,3 +1,6 @@
+# main.py — Futebol Virtual -> Sinais no Telegram (Web Service + Playwright leve)
+# Observação: Virtuais são RNG; este bot só filtra "value". Use gestão e 1 gale.
+
 import os, math, re, time, threading
 from datetime import datetime
 import schedule
@@ -17,13 +20,13 @@ INTERVAL_MIN= int(os.getenv("INTERVAL_MIN")  or "3")
 BET365_URL  = os.getenv("BET365_URL") or "https://www.bet365.bet.br/#/AVR/B146/R^1/"
 COOKIES_JSON= os.getenv("COOKIES_JSON") or ""
 
-# Não derruba o processo se faltar token (para o Gunicorn não falhar em import)
+# Bot só é criado se houver token (evita crash no import)
 bot = Bot(BOT_TOKEN) if BOT_TOKEN else None
 last_signal = {"text": None}
 bankroll_state = {"bankroll": BANKROLL}
 
-# ------------------ FLASK APP ------------------
-app = Flask(__name__)  # <<<<<<<<<<<<<<  ESSA VARIÁVEL PRECISA EXISTIR
+# ------------------ FLASK ------------------
+app = Flask(__name__)  # <— PRECISA existir para o gunicorn: main:app
 
 @app.get("/")
 def root():
@@ -91,6 +94,35 @@ def extract_by_locators(page):
     except: pass
     return {"O15":o15,"O25":o25,"BTTS":btts}
 
+def merge_odds(a,b):
+    out={}
+    for k in ["O15","O25","BTTS"]:
+        out[k]=a.get(k) or b.get(k)
+    return out
+
+# ------------------ NAVEGAÇÃO ENTRE LIGAS ------------------
+LEAGUES_PT = ["Express Cup", "Copa do Mundo", "Euro Cup", "Super Liga Sul-Americana", "Premier League"]
+
+def goto_league(page, name):
+    try:
+        tab = page.locator(f"text={name}").first
+        if tab:
+            tab.click(timeout=3000)
+            page.wait_for_timeout(2500)
+            # tenta expandir Gols Mais/Menos
+            try:
+                page.locator("text=Gols Mais/Menos").first.click(timeout=800)
+                page.wait_for_timeout(600)
+            except: pass
+            return True
+    except: pass
+    return False
+
+def grab_odds_now(page):
+    html = page.content()
+    return merge_odds(extract_by_regex(html), extract_by_locators(page))
+
+# ------------------ PLAYWRIGHT (modo leve) ------------------
 def with_browser(fn):
     def _wrap():
         with sync_playwright() as p:
@@ -108,7 +140,7 @@ def with_browser(fn):
                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"),
                 viewport={"width":1280,"height":720}
             )
-            # Bloqueia imagens/mídias para economizar memória
+            # bloqueia imagens/mídias p/ economizar RAM
             def _route(route):
                 if route.request.resource_type in ("image","media","font"):
                     return route.abort()
@@ -126,12 +158,13 @@ def with_browser(fn):
             page.goto(BET365_URL, timeout=60000, wait_until="domcontentloaded")
             try: page.wait_for_load_state("networkidle", timeout=15000)
             except: pass
-            page.wait_for_timeout(6000)
+            page.wait_for_timeout(6000)  # tempo pro grid aparecer
             res = fn(page)
             context.close(); browser.close()
             return res
     return _wrap
 
+# ------------------ DECISÃO E MENSAGEM ------------------
 def decide_and_text(odds):
     o25=odds.get("O25"); o15=odds.get("O15"); b=odds.get("BTTS")
     if not o25: return None, "Sem O2.5 na tela — pulando."
@@ -168,29 +201,42 @@ def decide_and_text(odds):
         body += [f"⚠️ Sem value claro (diferença ~ {dv*100:.1f}%). Pular."]
     return (True, header+"\n"+"\n".join(body)), None
 
-def merge_odds(a,b):
-    out={}
-    for k in ["O15","O25","BTTS"]:
-        out[k]=a.get(k) or b.get(k)
-    return out
-
+# ------------------ SCAN: gira ligas até achar odds ------------------
 @with_browser
 def scan_once(page):
-    html = page.content()
-    o_regex = extract_by_regex(html)
-    o_loc   = extract_by_locators(page)
-    odds = merge_odds(o_regex, o_loc)
-    print("ODDS EXTRAIDAS:", odds)
+    odds = {"O15": None, "O25": None, "BTTS": None}
+    league_used = None
+
+    # tenta na liga atual
+    try:
+        odds = grab_odds_now(page)
+    except: pass
+
+    # se não achou O2.5, gira pelas ligas
+    if not odds.get("O25"):
+        for lg in LEAGUES_PT:
+            if goto_league(page, lg):
+                tmp = grab_odds_now(page)
+                if tmp.get("O25"):
+                    odds = tmp
+                    league_used = lg
+                    break
+
+    print("LIGA:", league_used or "atual", " — ODDS:", odds)
+
     signal, err = decide_and_text(odds)
-    if err or not signal: 
-        return {"odds":odds,"sent":False,"reason":err}
+    if err or not signal:
+        return {"odds": odds, "sent": False, "reason": err, "league": league_used}
+
     _, text = signal
     if bot and text != last_signal["text"]:
         bot.send_message(chat_id=CHANNEL_ID, text=text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
         last_signal["text"] = text
-        return {"odds":odds,"sent":True}
-    return {"odds":odds,"sent":False,"reason":"duplicated or no bot"}
+        return {"odds": odds, "sent": True, "league": league_used}
 
+    return {"odds": odds, "sent": False, "reason": "duplicated or no bot", "league": league_used}
+
+# ------------------ SCHEDULER ------------------
 def scheduler_loop():
     schedule.every(INTERVAL_MIN).minutes.do(scan_once)
     time.sleep(40)  # atraso para não pesar no boot
@@ -199,11 +245,11 @@ def scheduler_loop():
         schedule.run_pending()
         time.sleep(1)
 
-# thread do agendador ao importar o módulo
+# inicia a thread assim que o módulo é importado
 t = threading.Thread(target=scheduler_loop, daemon=True)
 t.start()
 
-# Endpoint de diagnóstico
+# endpoint de diagnóstico
 @app.get("/scan")
 def scan_endpoint():
     try:
