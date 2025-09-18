@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Dependências do Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget gnupg ca-certificates libnss3 libx11-6 libx11-xcb1 libxcomposite1 libxcursor1 \
     libxdamage1 libxi6 libxtst6 libdrm2 libgbm1 libxrandr2 libasound2 libpangocairo-1.0-0 \
@@ -15,5 +14,5 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 COPY main.py .
 
-# Tempo maior pro worker inicializar com folga
+# Timeout maior pro worker iniciar com folga
 CMD ["sh", "-c", "gunicorn -w 1 -t 180 -b 0.0.0.0:${PORT} main:app"]
