@@ -28,7 +28,7 @@ async def scan():
                 ]
             )
             page = await browser.new_page()
-            await page.goto("https://www.bet365.bet.br/#/AVR/B146/R^1/", timeout=60000)
+            await page.goto("https://www.bet365.bet.br/#/AVR/B146/R^1/", timeout=30000)
             await asyncio.sleep(5)
             await browser.close()
         return jsonify({"status": "ok", "reason": "Scan executado com sucesso!"})
