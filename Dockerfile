@@ -1,5 +1,6 @@
 FROM python:3.11-slim
 
+# Dependências do Chromium (Playwright)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget gnupg ca-certificates libnss3 libx11-6 libx11-xcb1 libxcomposite1 libxcursor1 \
     libxdamage1 libxi6 libxtst6 libdrm2 libgbm1 libxrandr2 libasound2 libpangocairo-1.0-0 \
@@ -14,5 +15,5 @@ RUN pip install --no-cache-dir -r requirements.txt && \
 
 COPY main.py .
 
-# Timeout maior pro worker iniciar com folga
+# Timeout maior para boot, 1 worker para não duplicar a thread
 CMD ["sh", "-c", "gunicorn -w 1 -t 180 -b 0.0.0.0:${PORT} main:app"]
