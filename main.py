@@ -1,7 +1,8 @@
 # main.py — Futebol Virtual -> Sinais no Telegram (Web Service + Playwright leve)
 # Notas:
-# - Virtuais são RNG. O bot só filtra "value". Use gestão de banca e apenas 1 gale.
-# - Este arquivo inclui: /health, /scan (diagnóstico), giro de ligas e horários.
+# - Virtuais são RNG. Este bot filtra "value" e usa 1 gale. Sem garantias.
+# - Endpoints: /health (status) e /scan (força varredura e mostra odds).
+# - Gira entre ligas e clica em horários livres para escapar de “evento iniciado”.
 
 import os, math, re, time, threading
 from datetime import datetime
@@ -27,7 +28,7 @@ last_signal = {"text": None}
 bankroll_state = {"bankroll": BANKROLL}
 
 # ------------------ FLASK ------------------
-app = Flask(__name__)  # <- o gunicorn usa main:app
+app = Flask(__name__)  # gunicorn usa main:app
 
 @app.get("/")
 def root():
@@ -71,7 +72,6 @@ def parse_float(txt):
     except: return None
 
 def extract_from_html(html: str):
-    """Regex no HTML (main frame)."""
     o15=o25=btts=None
     m25=re.search(r"(?:Mais\s+de\s*)?2[.,]5[\s\S]{0,120}?"+ODD_PAT, html, re.I)
     if m25: o25=parse_float(m25.group(1))
@@ -82,7 +82,6 @@ def extract_from_html(html: str):
     return {"O15":o15,"O25":o25,"BTTS":btts}
 
 def extract_from_text(text: str):
-    """Regex no texto bruto renderizado (innerText)."""
     o15=o25=btts=None
     m25=re.search(r"Mais\s*de\s*2[.,]5[\s\n\r]{0,10}"+ODD_PAT, text, re.I)
     if m25: o25=parse_float(m25.group(1))
@@ -90,7 +89,6 @@ def extract_from_text(text: str):
     if m15: o15=parse_float(m15.group(1))
     mb =re.search(r"(Ambos\s+os\s+Times|Ambas\s+as\s+Equipes|Ambos\s+Marcam)[\s\S]{0,160}?(?:Sim)[\s\S]{0,32}?"+ODD_PAT, text, re.I)
     if mb:  btts=parse_float(mb.group(1))
-    # Fallback sem “Mais de”: 2.5 em linha com odd ao lado
     if not o25:
         m=re.search(r"\b2[.,]5\b[\s\n\r]{0,20}"+ODD_PAT, text)
         if m: o25=parse_float(m.group(1))
@@ -100,21 +98,17 @@ def extract_from_text(text: str):
     return {"O15":o15,"O25":o25,"BTTS":btts}
 
 def extract_by_locators(page):
-    """Vasculha o DOM por vizinhança de '1.5'/'2.5' e por 'Ambos os Times'."""
     o15=o25=btts=None
     try:
-        # odds próximas de “2.5” e “1.5”
         for needle,key in [("2.5","O25"),("1.5","O15")]:
             node = page.locator(f"text=/\\b{needle}\\b/").first
             if node:
-                # pega HTML do contêiner mais próximo
                 html = node.locator("xpath=ancestor-or-self::*[1]").inner_html()
                 m = re.search(ODD_PAT, html)
                 if m:
                     val = parse_float(m.group(1))
                     if key=="O25": o25=val
                     else: o15=val
-        # BTTS
         node = page.locator("text=/Amb(os|as).*(Times|Equipes)|Ambos\\s+Marcam/i").first
         if node:
             inner = node.locator("xpath=..").inner_html()
@@ -139,7 +133,6 @@ def goto_league(page, name):
         if tab:
             tab.click(timeout=2500)
             page.wait_for_timeout(2000)
-            # tenta expandir Gols Mais/Menos
             try:
                 page.locator("text=/Gols\\s+Mais\\/Menos|Total\\s+de\\s+Gols/i").first.click(timeout=800)
                 page.wait_for_timeout(400)
@@ -149,14 +142,14 @@ def goto_league(page, name):
     return False
 
 def click_time_slot(page):
-    """Clica no primeiro horário visível (ex.: 21:52) para sair de 'Evento iniciado'."""
+    """Clica em um horário (ex.: 9:52 ou 21:52) para sair de 'Evento iniciado'."""
     try:
-        slots = page.locator("text=/^\\d{2}:\\d{2}$/")
+        slots = page.locator("text=/\\b\\d{1,2}:\\d{2}\\b/")
         n = slots.count()
-        for i in range(min(n,5)):
+        for i in range(min(n, 6)):
             try:
-                slots.nth(i).click(timeout=800)
-                page.wait_for_timeout(1200)
+                slots.nth(i).click(timeout=900)
+                page.wait_for_timeout(1300)
                 return True
             except:
                 continue
@@ -165,15 +158,14 @@ def click_time_slot(page):
     return False
 
 def grab_odds_now(page):
-    """Combina 3 estratégias: HTML, innerText e locators."""
     html = page.content()
-    text = page.evaluate("document.body.innerText")  # captura texto renderizado
+    text = page.evaluate("document.body.innerText")
     a = extract_from_html(html)
     b = extract_from_text(text)
     c = extract_by_locators(page)
     return merge_odds(a,b,c)
 
-# ------------------ PLAYWRIGHT (modo leve) ------------------
+# ------------------ PLAYWRIGHT (modo leve + locale PT-BR) ------------------
 def with_browser(fn):
     def _wrap():
         with sync_playwright() as p:
@@ -183,17 +175,20 @@ def with_browser(fn):
                     "--no-sandbox","--disable-dev-shm-usage","--disable-gpu",
                     "--disable-extensions","--disable-background-networking",
                     "--disable-background-timer-throttling","--disable-renderer-backgrounding",
-                    "--no-zygote","--single-process","--js-flags=--max-old-space-size=128"
+                    "--no-zygote","--js-flags=--max-old-space-size=128"
                 ]
             )
             context = browser.new_context(
                 user_agent=("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"),
-                viewport={"width":1280,"height":720}
+                viewport={"width":1280,"height":720},
+                locale="pt-BR",
+                timezone_id="America/Sao_Paulo",
+                extra_http_headers={"Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7"}
             )
-            # bloqueia imagens/mídias p/ economizar RAM
+            # NÃO bloqueie 'font' (muitas casas desenham dígitos via webfont)
             def _route(route):
-                if route.request.resource_type in ("image","media","font"):
+                if route.request.resource_type in ("image","media"):
                     return route.abort()
                 return route.continue_()
             context.route("**/*", _route)
@@ -209,6 +204,8 @@ def with_browser(fn):
             page.goto(BET365_URL, timeout=60000, wait_until="domcontentloaded")
             try: page.wait_for_load_state("networkidle", timeout=15000)
             except: pass
+            try: page.wait_for_selector("text=/Gols\\s+Mais\\/Menos|Total\\s+de\\s+Gols/i", timeout=10000)
+            except: pass
             page.wait_for_timeout(5000)
             res = fn(page)
             context.close(); browser.close()
@@ -219,7 +216,6 @@ def with_browser(fn):
 def decide_and_text(odds):
     o25=odds.get("O25"); o15=odds.get("O15"); b=odds.get("BTTS")
     if not o25: return None, "Sem O2.5 na tela — pulando."
-    # λ estimado pela faixa de O2.5
     lam=lam_from_o25(o25)
     p15=p_over15(lam); fair15=odd(p15)
     p25=p_over25(lam); fair25=odd(p25)
@@ -253,28 +249,27 @@ def decide_and_text(odds):
         body += [f"⚠️ Sem value claro (diferença ~ {dv*100:.1f}%). Pular."]
     return (True, header+"\n"+"\n".join(body)), None
 
-# ------------------ SCAN ------------------
+# ------------------ SCAN (gira horários/ligas) ------------------
 @with_browser
 def scan_once(page):
     odds = {"O15": None, "O25": None, "BTTS": None}
     league_used = None
 
-    # 1) tenta liga atual
+    # 1) liga atual
     try:
         odds = grab_odds_now(page)
     except:
         pass
 
-    # 2) se ainda sem O2.5, clica em horários (foge do 'Evento iniciado')
+    # 2) clicar em horário (sair de 'evento iniciado')
     if not odds.get("O25"):
         if click_time_slot(page):
             odds = grab_odds_now(page)
 
-    # 3) se ainda não achou, gira ligas
+    # 3) girar ligas
     if not odds.get("O25"):
         for lg in LEAGUES_PT:
             if goto_league(page, lg):
-                # após trocar de liga, também tenta clicar num horário
                 click_time_slot(page)
                 tmp = grab_odds_now(page)
                 if tmp.get("O25"):
@@ -299,13 +294,13 @@ def scan_once(page):
 # ------------------ AGENDADOR ------------------
 def scheduler_loop():
     schedule.every(INTERVAL_MIN).minutes.do(scan_once)
-    time.sleep(40)  # atraso no boot p/ não sobrecarregar
+    time.sleep(40)  # atraso no boot
     scan_once()
     while True:
         schedule.run_pending()
         time.sleep(1)
 
-# inicializa thread do agendador ao importar
+# inicia thread ao importar o módulo
 t = threading.Thread(target=scheduler_loop, daemon=True)
 t.start()
 
