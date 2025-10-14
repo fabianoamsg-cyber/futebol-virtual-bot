@@ -16,18 +16,22 @@ async def scan():
                 headless=True,
                 args=[
                     "--no-sandbox",
+                    "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-software-rasterizer",
-                    "--disable-setuid-sandbox",
-                    "--single-process"
+                    "--single-process",
+                    "--no-zygote",
+                    "--disable-extensions",
+                    "--disable-infobars",
+                    "--disable-notifications"
                 ]
             )
             page = await browser.new_page()
             await page.goto("https://www.bet365.bet.br/#/AVR/B146/R^1/", timeout=60000)
             await asyncio.sleep(5)
             await browser.close()
-        return jsonify({"status": "ok", "reason": "Navegação concluída com sucesso!"})
+        return jsonify({"status": "ok", "reason": "Scan executado com sucesso!"})
     except Exception as e:
         return jsonify({"status": "erro", "motivo": str(e)}), 500
 
