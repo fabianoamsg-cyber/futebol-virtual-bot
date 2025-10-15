@@ -1,4 +1,4 @@
-Flask[async]==3.0.3
+Flask==3.0.3
 gunicorn==23.0.0
 playwright==1.48.0
-asyncio
+requests==2.32.3
