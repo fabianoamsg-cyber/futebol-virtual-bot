@@ -33,12 +33,12 @@ LEAGUES_PT = [
 
 # ================== FAIXAS ASSERTIVAS ==================
 # Mantém qualidade, mas dá volume. Ajuste se quiser mais/menos sinais.
-RANGE_O15   = (1.22, 1.55)
-RANGE_O25   = (1.70, 2.20)
-RANGE_BTTS  = (1.65, 2.10)
-RANGE_HOME  = (1.50, 2.40)  # Vitória time da casa
-RANGE_DRAW  = (3.00, 3.90)  # Empate (opcionalmente mais restrito)
-RANGE_AWAY  = (1.80, 2.60)  # Vitória visitante
+RANGE_O15   = (1.15, 1.70)
+RANGE_O25   = (1.55, 2.35)
+RANGE_BTTS  = (1.55, 2.35)
+RANGE_HOME  = (1.40, 2.70)  # Vitória time da casa
+RANGE_DRAW  = (2.80, 4.20)  # Empate (opcionalmente mais restrito)
+RANGE_AWAY  = (1.60, 2.90)  # Vitória visitante
 
 PRIORITY = [
     "Over 2.5", "BTTS (Ambos Marcam)", "Over 1.5",
