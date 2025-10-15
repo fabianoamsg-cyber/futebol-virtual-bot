@@ -24,16 +24,30 @@ async def scan():
                     "--no-zygote",
                     "--disable-extensions",
                     "--disable-infobars",
-                    "--disable-notifications"
+                    "--disable-notifications",
+                    "--mute-audio",
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--disable-translate",
+                    "--hide-scrollbars",
+                    "--disable-features=site-per-process,TranslateUI,BlinkGenPropertyTrees"
                 ]
             )
+
             page = await browser.new_page()
-            await page.goto("https://www.bet365.bet.br/#/AVR/B146/R^1/", timeout=30000)
+            await page.goto("https://www.bet365.bet.br/#/AVR/B146/R^1/", timeout=45000)
+
+            # Espera alguns segundos para garantir que o site carregou
             await asyncio.sleep(5)
+
+            # Retorna um texto simples para confirmar que rodou
             await browser.close()
-        return jsonify({"status": "ok", "reason": "Scan executado com sucesso!"})
+            return jsonify({"status": "ok", "reason": "Scan executado com sucesso!"})
+
     except Exception as e:
         return jsonify({"status": "erro", "motivo": str(e)}), 500
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
